@@ -1,1 +1,1050 @@
 # Results
+
+My analysis of the 2024 Formula 1 season reveals clear and consistent patterns in how drivers perform relative to their teammates once we account for context such as track type, wet weather, and overtaking difficulty. First, I analyzed intra-team comparisons for popular driver rating features: pace (based on qualifying performance) and racecraft (based on positions overtaken). Afterwards, I incorporated track type, track conditioners, and circuit difficulty to gain a better understanding of intra-team dynamics and success. Finally, I ran a basic prediction to determine how accounting for these external factors' impact on pace and racecraft contribute to driver success, and I compared the prediction to the actual 2024 season standings. Across the grid, the strongest predictor of success is intuitive in that drivers who qualify better tend to finish better, even after adjusting for conditions. Racecraft helps explain additional differences, especially on street circuits and in wet weather, where confidence and adaptability matter even more. Visualizing these patterns highlights which drivers consistently extract more performance from their car and which teams show the largest gaps between their two drivers. Overall, the results paint a nuanced picture of driver skill that goes beyond championship points, offering a more context-aware understanding of what made certain drivers successful in 2024.
+
+```{r}
+# load packages
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(forcats)
+library(scales)
+library(naniar)
+library(glue)
+
+theme_set(theme_minimal(base_size = 14))
+
+parse_time_to_seconds <- function(x) {
+  # proper race time "H:MM:SS.sss"
+  is_race_time <- grepl("^\\d+:\\d{2}:\\d{2}\\.\\d+$", x)
+  
+  # gap time "+SS.sss"
+  is_gap_time <- grepl("^\\+\\d", x)
+  
+  out <- rep(NA_real_, length(x))
+  
+  # convert full race times
+  out[is_race_time] <- sapply(x[is_race_time], function(t) {
+    hms <- strsplit(t, ":")[[1]]
+    as.numeric(hms[1]) * 3600 +
+      as.numeric(hms[2]) * 60 +
+      as.numeric(hms[3])
+  })
+  
+  # convert gap times
+  out[is_gap_time] <- as.numeric(sub("\\+", "", x[is_gap_time]))
+  
+  out
+}
+
+# consistent palette for constructors (will expand automatically)
+constructor_palette <- scale_color_viridis_d(option = "turbo")
+constructor_fill_palette <- scale_fill_viridis_d(option = "turbo")
+
+```
+```{r}
+library(jsonlite)
+library(purrr)
+library(dplyr)
+library(naniar)
+library(ggplot2)
+
+# qualifying results
+get_qualifying <- function(round) {
+  url <- paste0(
+    "https://api.jolpi.ca/ergast/f1/2024/",
+    round,
+    "/qualifying.json"
+  )
+
+  tryCatch({
+    res <- jsonlite::fromJSON(url)
+    races <- res$MRData$RaceTable$Races
+
+    # Some rounds might not have qualifying data
+    if (length(races) == 0 || is.null(races$QualifyingResults[[1]])) {
+      message("No qualifying for round: ", round)
+      return(NULL)
+    }
+
+    df <- races$QualifyingResults[[1]]
+    df$round <- round
+    return(df)
+  }, error = function(e) {
+    message("Failed on round: ", round)
+    return(NULL)
+  })
+}
+
+qual_df <- purrr::map_df(1:24, get_qualifying)
+
+# race results
+get_race_results <- function(round) {
+  url <- paste0(
+    "https://api.jolpi.ca/ergast/f1/2024/",
+    round,
+    "/results.json"
+  )
+
+  tryCatch({
+    res <- jsonlite::fromJSON(url)
+    races <- res$MRData$RaceTable$Races
+
+    if (length(races) == 0 || is.null(races$Results[[1]])) {
+      message("No race results for round: ", round)
+      return(NULL)
+    }
+
+    df <- races$Results[[1]]
+    df$round <- round
+    return(df)
+  }, error = function(e) {
+    message("Failed on round: ", round)
+    return(NULL)
+  })
+}
+
+race_df <- purrr::map_df(1:24, get_race_results)
+```
+
+```{r}
+# clean dfs
+library(tidyr)
+
+race_df_clean <- race_df |>
+  # expand nested Driver info
+  unnest_wider(Driver, names_sep = "_") |>
+  
+  # expand nested Constructor info
+  unnest_wider(Constructor, names_sep = "_") |>
+  unnest_wider(Time, names_sep = "_", simplify = TRUE) |>
+  unnest_wider(FastestLap, names_sep = "_", simplify = TRUE)
+
+
+race_df_subset <- race_df_clean |>
+  select(
+    round,
+    position = position,
+    driver = Driver_familyName,
+    driver_code = Driver_code,
+    constructor = Constructor_name,
+    grid = grid,
+    laps = laps,
+    status = status,
+    points = points,
+    time = Time_time
+  )
+
+qual_df_clean <- qual_df |>
+  unnest_wider(Driver, names_sep = "_") |>
+  
+  # Expand Constructor info
+  unnest_wider(Constructor, names_sep = "_") |>
+  
+  # Convert Q1/Q2/Q3 times to character (some are missing)
+  mutate(
+    Q1 = as.character(Q1),
+    Q2 = as.character(Q2),
+    Q3 = as.character(Q3)
+  )
+
+qual_df_subset <- qual_df_clean |>
+  select(
+    round,
+    position,
+    driver = Driver_familyName,
+    driver_code = Driver_code,
+    constructor = Constructor_name,
+    number,
+    Q1,
+    Q2,
+    Q3
+  )
+
+head(race_df_subset)
+head(qual_df_subset)
+```
+
+```{r}
+# data preparation
+race <- race_df_subset |>
+mutate(
+round = as.integer(round),
+finish_pos = as.integer(position),
+grid_pos = as.integer(grid),
+laps = as.integer(laps),
+points = suppressWarnings(as.numeric(points)),
+status = as.character(status),
+driver = as.character(driver),
+driver_code = as.character(driver_code),
+constructor = as.character(constructor),
+race_time_sec = parse_time_to_seconds(time)
+) |>
+select(round, driver, driver_code, constructor, finish_pos, grid_pos, laps, status, points, race_time_sec)
+
+qual <- qual_df_subset |>
+mutate(
+round = as.integer(round),
+qual_pos = suppressWarnings(as.integer(position)),
+driver = as.character(driver),
+driver_code = as.character(driver_code),
+constructor = as.character(constructor),
+Q1_sec = parse_time_to_seconds(Q1),
+Q2_sec = parse_time_to_seconds(Q2),
+Q3_sec = parse_time_to_seconds(Q3)
+) |>
+select(round, driver, driver_code, constructor, qual_pos, Q1_sec, Q2_sec, Q3_sec)
+
+# merge qualifying + race on round + driver_code
+
+race_qual <- race |>
+left_join(qual |> select(round, driver_code, qual_pos, Q1_sec, Q2_sec, Q3_sec),
+by = c("round", "driver_code"))
+
+# compute positions_gained: (qual_pos - finish_pos)
+# if qual_pos is NA, fallback to grid_pos if available.
+race_qual <- race_qual |>
+mutate(
+qual_for_comparison = if_else(is.na(qual_pos), grid_pos, qual_pos),
+positions_gained = qual_for_comparison - finish_pos)
+
+team_stats_by_round <- race_qual |>
+group_by(round, constructor) |>
+summarize(
+mean_qual_pos = mean(qual_for_comparison, na.rm = TRUE),
+mean_finish_pos = mean(finish_pos, na.rm = TRUE),
+mean_positions_gained = mean(positions_gained, na.rm = TRUE),
+n_drivers = n(),
+n_missing_Q3 = sum(is.na(Q3_sec)),
+.groups = "drop"
+)
+
+team_stats_overall <- race_qual |>
+group_by(constructor) |>
+summarize(
+avg_qual_pos = mean(qual_for_comparison, na.rm = TRUE),
+avg_finish_pos = mean(finish_pos, na.rm = TRUE),
+avg_positions_gained = mean(positions_gained, na.rm = TRUE),
+n_races = n(),
+.groups = "drop"
+)
+
+# tracks_df for accounting for track features
+tracks_df <- tibble(
+  round = 1:24,
+  circuit = c(
+    "Bahrain International Circuit",
+    "Jeddah Corniche Circuit",
+    "Albert Park Circuit",
+    "Suzuka International Racing Course",
+    "Shanghai International Circuit",
+    "Miami International Autodrome",
+    "Imola Circuit",
+    "Circuit de Monaco",
+    "Circuit Gilles Villeneuve",
+    "Circuit de Barcelona-Catalunya",
+    "Red Bull Ring",
+    "Silverstone Circuit",
+    "Hungaroring",
+    "Circuit de Spa-Francorchamps",
+    "Circuit Zandvoort",
+    "Monza Circuit",
+    "Baku City Circuit",
+    "Marina Bay Street Circuit",
+    "Circuit of the Americas",
+    "Autódromo Hermanos Rodríguez",
+    "Interlagos Circuit",
+    "Las Vegas Strip Circuit",
+    "Lusail International Circuit",
+    "Yas Marina Circuit"
+  )
+)
+
+street_circuits <- c(
+  "Jeddah Corniche Circuit",
+  "Albert Park Circuit",
+  "Miami International Autodrome",
+  "Circuit de Monaco",
+  "Circuit Gilles Villeneuve",
+  "Baku City Circuit",
+  "Marina Bay Street Circuit",
+  "Las Vegas Strip Circuit"
+)
+
+tracks_df <- tracks_df |>
+  mutate(
+    circuit_type = ifelse(circuit %in% street_circuits, "street", "permanent")
+  )
+
+wet_races <- c(9, 12, 21)
+
+tracks_df <- tracks_df |>
+  mutate(is_wet_race = round %in% wet_races)
+wet_qual <- c(12, 13, 14, 21)
+
+tracks_df <- tracks_df |>
+  mutate(is_wet_qual = round %in% wet_qual)
+
+team_stats_by_round <- team_stats_by_round |>
+  left_join(tracks_df, by = "round")
+
+race_qual <- race_qual |>
+  left_join(tracks_df, by = "round")
+
+# compute empirical overtaking score per round = mean absolute positions changed
+overtake_by_round <- race_qual |>
+  group_by(round) |>
+  summarize(
+    overtaking_score = mean(abs(positions_gained), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+tracks_df <- tracks_df |>
+  left_join(overtake_by_round, by = "round")
+
+# add overtaking score into race_qual
+race_qual <- race_qual |>
+  left_join(tracks_df |> select(round, overtaking_score), by = "round")
+
+team_stats_by_round <- team_stats_by_round |>
+  left_join(tracks_df |> select(round, overtaking_score), by = "round")
+
+# join tracks info back to team_stats_by_round and race_qual
+head(tracks_df)
+head(race_qual)
+
+```
+
+
+```{r}
+# Graph 1 - Raw Pace Comparison
+ggplot(
+  race_qual |> filter(!is.na(qual_for_comparison)),
+  aes(
+    x = fct_reorder(driver, qual_for_comparison, .fun = median),
+    y = qual_for_comparison)) +
+  geom_boxplot(width = 0.12, outlier.size = 0.8, alpha = 0.9) +
+  # reverse the axis that becomes horizontal
+  scale_y_reverse(breaks = c(1, 5, 10, 15, 20)) +
+  coord_flip() +
+  facet_wrap(~ constructor, scales = "free_y") +
+  labs(title = "Intra-Team Qualifying Pace Comparison",
+    subtitle = "Lower (faster) qualifying positions shown on the right.",
+    x = "Driver",
+    y = "Qualifying Position") +
+  theme_bw(base_size = 12) +
+  theme(strip.text = element_text(size = 8, face = "bold"),
+    strip.background = element_rect(fill = "gray95"),
+    plot.title = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size = 12, margin = margin(b = 8)),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 8))
+```
+##How do teammates compare in qualifying pace? - Drivers within the same car often show meaningful performance gaps.
+
+Drivers within the same team use identical cars, so differences in their qualifying positions reveal how much performance comes from the driver rather than the machinery. Moreover, this is an extremely common metric for evaluating pace when rating drivers. Across the grid, several teams show clear internal gaps: for example, Verstappen at Red Bull and Leclerc at Ferrari consistently qualify several positions ahead of their teammates. Other teams, such as McLaren, show much tighter spreads, indicating more evenly matched driver pairings in terms of pace. Teams that rotated drivers mid-season display wider and noisier distributions because some drivers have fewer appearances.
+
+```{r}
+# Graph 2 — Qualifying Session Appearance and Pace Comparison
+parse_lap_time <- function(x) {
+  x <- as.character(x)
+  x[x %in% c("", "NA", NA)] <- NA
+  is_mss <- grepl("^\\d+:\\d{2}\\.\\d+$", x)
+
+  out <- rep(NA_real_, length(x))
+
+  out[is_mss] <- sapply(x[is_mss], function(t) {
+    parts <- strsplit(t, "[:\\.]")[[1]]
+    minutes <- as.numeric(parts[1])
+    seconds <- as.numeric(parts[2])
+    millis  <- as.numeric(parts[3])
+    minutes * 60 + seconds + millis / 1000
+  })
+
+  out
+}
+
+qual_times <- qual_df_subset |>
+  mutate(
+    Q1_sec = parse_lap_time(Q1),
+    Q2_sec = parse_lap_time(Q2),
+    Q3_sec = parse_lap_time(Q3)
+  )
+
+driver_q_agg <- qual_times |>
+group_by(constructor, driver, driver_code) |>
+summarize(
+mean_Q1 = mean(Q1_sec, na.rm = TRUE),
+mean_Q2 = mean(Q2_sec, na.rm = TRUE),
+mean_Q3 = mean(Q3_sec, na.rm = TRUE),
+n = n(),
+.groups = "drop"
+) |>
+filter(n >= 3)   # focus on drivers with at least 3 appearances for stability
+
+driver_q_long <- driver_q_agg |>
+pivot_longer(cols = starts_with("mean_Q"), names_to = "session", values_to = "time_sec")
+
+ggplot(
+  driver_q_long |> filter(!is.na(time_sec)),
+  aes(
+    x = time_sec,
+    y = fct_reorder(driver, time_sec, .fun = median),
+    color = constructor
+  )
+) +
+  geom_point(aes(shape = session), size = 1.8, alpha = 0.9) +
+  constructor_palette +
+  labs(
+    title = "Within-Team Driver Pace: Average Q1/Q2/Q3 Times",
+    x = "Time (seconds)",
+    y = "Driver",
+    caption = "Drivers with ≥3 appearances shown; different shapes = session (Q1/Q2/Q3)"
+  ) +
+  theme(
+    legend.position = "right",
+    legend.spacing.y = unit(0.1, "lines"),
+    legend.key.size = unit(0.4, "lines"),    
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8),
+    plot.subtitle = element_text(size = 11)
+  )
+
+```
+##Teammate Comparisons Reveal Which Drivers Consistently Extract More Pace From the Car
+
+Across the season, average Q1–Q3 times highlight meaningful performance gaps within several teams. This visualization allows us an easier at a glance look at intra-team dynamics in that the drivers with missing higher quarter times and higher mean times per session indicate weaker performance in comparison to their teammate. 
+
+```{r}
+# Graph 3 — Racecraft Comparison
+ggplot(
+  race_qual |> filter(!is.na(positions_gained)),
+  aes(
+    x = fct_reorder(driver, positions_gained, .fun = median),
+    y = positions_gained)) +
+  geom_boxplot(alpha = 0.8, outlier.size = 1, width = 0.6) +
+  coord_flip() +
+  facet_wrap(~ constructor, scales = "free_y") +
+  labs(
+    title = "Intra-Team Racecraft Comparison",
+    subtitle = "Drivers who consistently make up positions from qualifying start higher.\nNegative values indicate drivers who tend to lose positions.",
+    x = "Driver",
+    y = "Positions Gained (qual → finish)"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 9, face = "bold"),
+    strip.background = element_rect(fill = "gray95"),
+    legend.position = "none",
+    panel.grid.minor = element_blank()
+  )
+
+```
+## Compare differences in positions gained within each constructor to determine racecraft abilities, indicating higher competenecies in overtaking and defending position.
+
+This racecraft analysis highlights how effectively each driver converts their qualifying position into race results, revealing substantial differences within several teams. Norris, Sainz, and Hamilton consistently gain positions on race day, marking them as standouts in overtaking, tire management, or race strategy execution. Their teammates, Piastri, Leclerc, and Russell, show slightly more variable outcomes, typically gaining fewer positions. One of the more interesting performances is Red Bull: Verstappen rarely gains or loses positions because he starts at the front, while Perez may slip backward from strong qualifying spots, emphasizing a persistent race-day deficit. Overall, the plot shows that while qualifying pace sets the stage, racecraft varies meaningfully within teams and strongly influences final outcomes.
+
+```{r}
+# Graph 4 — Wet vs. Dry Conditions Pace Comparison
+wet_pace <- race_qual |>
+filter(!is.na(is_wet_qual)) |>
+group_by(constructor, is_wet_qual) |>
+summarize(mean_qual = mean(qual_for_comparison, na.rm = TRUE), .groups = "drop")
+
+if (nrow(wet_pace) > 0) {
+ggplot(wet_pace, aes(x = as.factor(is_wet_qual), y = mean_qual, group = constructor, color = constructor)) +
+geom_line(aes(group = constructor), linewidth = 1) +
+geom_point(size = 2) +
+scale_x_discrete(labels = c("dry","wet")) +
+labs(title = "Team Pace: Wet vs Dry (mean qualifying position)",
+x = "Condition", y = "Mean Qualifying Position (lower = faster)") +
+constructor_palette
+} else {
+ggplot() + labs(title = "No wet/dry labels found in tracks_df — fill tracks_df$is_wet to enable this plot")
+}
+```
+## We are analyzing race pace in wet weather qualifying conditions compared to dry. Wet weather dramatically reduces grip and visibility, some consider it to even equalize differences in car performance.
+
+This comparison of average qualifying performance in wet versus dry sessions reveals that most teams experience only modest changes in pace when conditions worsen, but a few show dramatic shifts. McLaren and Ferrari stand out as the strongest wet-weather qualifiers, improving relative to the field when the track becomes slippery—suggesting their cars maintain tire temperature and mechanical grip well. Aston Martin also gains performance in the wet, climbing several grid spots on average. On the other hand, traditionally strong teams like Mercedes and Red Bull qualify noticeably worse in the wet, indicating that their setups or driver comfort are more sensitive to unstable grip levels. Lower-grid teams such as Sauber and Williams remain near the back in both conditions. 
+
+```{r}
+# Graph 5 - Wet Qualifying Pace
+
+wet_qual_rounds <- tracks_df |> 
+  filter(is_wet_qual == TRUE) |>
+  pull(round)
+
+wet_qual_data <- race_qual |>
+  filter(round %in% wet_qual_rounds)
+
+ggplot(
+  wet_qual_data |> filter(!is.na(qual_for_comparison)),
+  aes(y = fct_reorder(driver, qual_for_comparison, .fun = median),
+    x = qual_for_comparison)) +
+  geom_boxplot(width = 0.15, outlier.size = 1, alpha = 0.85) +
+  scale_x_reverse(breaks = c(20, 15, 10, 5, 1)) +
+  
+  facet_wrap(~ constructor, scales = "free_y") +
+  
+  labs(title = "Intra-Team Wet-Weather Qualifying Pace",
+    x = "Qualifying Position (lower = faster)",
+    y = "Driver") +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 8, face = "bold"),
+    strip.background = element_rect(fill = "gray95"),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+    panel.grid.minor = element_blank(),
+    legend.position = "none")
+```
+## Subheading: Who Thrives When the Track Turns Wet? Intra-Team Pace Under Rain Conditions
+
+Wet qualifying compresses the field and is said to expose pure driver skill. Across teams, the drivers positioned farther to the right are those who deliver stronger wet-weather performance. McLaren sees Norris consistently outperform Piastri in the rain, while Hamilton shows a noticeable wet-pace advantage over Russell at Mercedes. Ferrari’s intra-team battle tightens, with Sainz marginally outperforming Leclerc when grip is at a premium. Red Bull's wet performance split is especially stark in that Verstappen reliably anchors the right side of the distribution while Pérez drifts left, indicating greater difficulty in low-grip conditions. Teams lower in the order—such as Williams and Alpine display tighter teammate groupings, suggesting car limitations overshadow driver differences.
+
+```{r}
+# Graph 6 — Wet vs. Dry Conditions Racecraft Comparison
+library(Polychrome)
+driver_palette <- createPalette(length(unique(race_qual$driver)), seedcolors=c("#ff0000"))
+names(driver_palette) <- sort(unique(race_qual$driver))
+
+
+wetdry_driver <- race_qual |>
+  filter(!is.na(is_wet_race)) |>
+  mutate(
+    condition = ifelse(is_wet_race, "Wet", "Dry"),
+    condition = factor(condition, levels = c("Dry", "Wet"))
+  )
+
+# Summarize per driver per condition
+wetdry_driver_summary <- wetdry_driver |>
+  group_by(constructor, driver, condition) |>
+  summarize(
+    mean_gain = mean(positions_gained, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(
+  wetdry_driver_summary,
+  aes(
+    x = condition,
+    y = mean_gain,
+    group = driver,
+    color = driver
+  )
+) +
+  geom_point(size = 2) +
+  geom_line(alpha = 0.8, linewidth = 0.9) +
+
+  scale_x_discrete(limits = c("Dry", "Wet")) +
+  scale_color_manual(values = driver_palette) +   # <-- NEW PALETTE
+
+  facet_wrap(
+    ~ constructor,
+    scales = "free_y",
+    labeller = label_wrap_gen(width = 12)) +
+
+  labs(
+    title = "Wet vs Dry Racecraft: Intra-Team Comparison",
+    subtitle = "Each line represents one driver within a team, showing how their average positions gained changes in wet vs dry races.",
+    x = "Conditions",
+    y = "Mean Positions Gained",
+    color = "Driver"
+  ) +
+
+  theme_bw(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 8, face = "bold"),
+    strip.background = element_rect(fill = "gray95"),
+    panel.grid.minor = element_blank(),
+
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right",
+    legend.key.size = unit(0.45, "lines"),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8, face = "bold"),
+    legend.spacing.y = unit(0.1, "cm")) +
+  guides(color = guide_legend(ncol = 1))
+```
+## How Teams Gain or Lose Positions in Wet vs Dry Races
+
+This visualization highlights how teams show drivers who thrive when the track gets slippery. For example, both Alpine, Sauber, and Haas see strong positive gains in the wet, with certain drivers making significantly more progress than they manage in dry races. These trends suggest confident car control and adaptability under low-grip conditions. By contrast, Aston Martin, RB, and Williams show the opposite behavior, where drivers tend to perform worse in wet races, losing more positions on average compared to their dry-race results. Mercedes, Red Bull, and McLaren reveal clear divergence between teammates in that one driver improves dramatically in the wet while the other falls off, indicating that wet-weather performance is more driver-dependent rather than car-dependent in these teams.
+
+```{r}
+# Graph 7 — Circuit Type Pace Comparison
+
+street_stats <- race_qual |>
+  filter(!is.na(circuit_type)) |>
+  group_by(constructor, driver, circuit_type) |>
+  summarize(
+    mean_qual = mean(qual_for_comparison, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) |>
+  filter(n >= 2) |>   # require at least 2 appearances per type
+  mutate(circuit_type = factor(circuit_type, levels = c("permanent", "street")))
+
+ggplot(
+  street_stats,
+  aes(
+    x = circuit_type,
+    y = mean_qual,
+    group = driver,
+    color = driver
+  )) +
+  
+  geom_line(linewidth = 1, alpha = 0.8) +
+  geom_point(size = 2) +
+
+  scale_y_reverse() +   # lower positions = better
+  scale_color_manual(values = driver_palette) + 
+  facet_wrap(
+    ~ constructor,
+    scales = "free_y",
+    labeller = label_wrap_gen(width = 12)) +
+  labs(title = "Intra-Team Qualifying Pace: Street vs Permanent Circuits",
+    x = "Circuit Type",
+    y = "Mean Qualifying Position",
+    color = "Driver") +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 8, face = "bold"),
+    strip.background = element_rect(fill = "gray95"),
+    axis.text.x = element_text(size = 8, angle = 15, vjust = 1, hjust = 1),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 9),
+    legend.position = "right",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 7),
+    legend.key.size = unit(0.35, "cm"),
+    legend.spacing.y = unit(0.15, "cm")) +
+  guides(color = guide_legend(ncol = 1))
+```
+## How Drivers Adapt Their Pace Across Street vs Permanent Circuits - Street Circuits Can Require Greater Confidence and Precision
+
+Across teams, most drivers demonstrate noticeably different qualifying performance depending on circuit type, reinforcing that pace is strongly track-dependent. Mercedes, Alpine, and Williams show consistent improvements on street circuits, where lower-speed technical sections reward mechanical grip and confidence on the limit. Conversely, McLaren, Haas, Red Bull, and Sauber tend to perform similarly or even slightly worse on street tracks, suggesting their strengths lean toward high-speed or more traditional layouts. Within-team variation is especially notable in Ferrari, RB, and Aston Martin, where one driver seems to improve on street circuits while the other seems to lose pace.
+
+```{r}
+# Graph 8 - Circuit Type Racecraft Comparison
+racecraft_circuit <- race_qual |>
+  filter(!is.na(circuit_type)) |>
+  group_by(constructor, driver, circuit_type) |>
+  summarize(
+    mean_gain = mean(positions_gained, na.rm = TRUE),
+    n_rounds = n(),
+    .groups = "drop"
+  ) |>
+  filter(n_rounds >= 2) |>    # require ≥ 2 races per driver per circuit type
+  mutate(circuit_type = factor(circuit_type, levels = c("permanent", "street")))
+
+ggplot(
+  racecraft_circuit,
+  aes(
+    x = circuit_type,
+    y = mean_gain,
+    group = driver,
+    color = driver
+  )
+) +
+  geom_point(size = 2) +
+  geom_line(linewidth = 0.9, alpha = 0.8) +
+
+  scale_color_manual(values = driver_palette) +  
+  scale_x_discrete(labels = c("Permanent", "Street")) +
+
+  facet_wrap(
+    ~ constructor,
+    scales = "free_y",
+    labeller = label_wrap_gen(width = 12) ) +
+
+  labs(title = "Racecraft Across Circuit Types: Street vs Permanent",
+    x = "Circuit Type",
+    y = "Mean Positions Gained (positive = gained places)",
+    color = "Driver") +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 9, face = "bold"),
+    strip.background = element_rect(fill = "gray95"),
+
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+
+    panel.grid.minor = element_blank(),
+    panel.spacing = unit(0.9, "lines"),
+
+    plot.title = element_text(size = 15, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+
+    legend.position = "right",
+    legend.key.size = unit(0.35, "cm"),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8),
+    legend.spacing.y = unit(0.1, "cm")
+  ) +
+  guides(
+    color = guide_legend(ncol = 1))
+```
+## Do Drivers Perform Better on Street or Permanent Circuits? Intra-Team Racecraft Patterns
+
+This plot compares how each driver’s positions gained relative to qualifying differ between street circuits and permanent tracks. A lot of street circuits, like Monaco and Baku, are notably difficult for overtaking due to their narrow stretches, so overtaking during these races is rare and impressive, yet sometimes may just be a result of a lucky strategy call. Some teams show notable intra-team differences in drivers' racecraft on street circuits. Specifically, Mclaren's Norris beats Piastri, Haas' Hulkenberg beats Magnussen, and Aston Martin's Alonso beats Stroll.
+
+```{r}
+# Graph 9 — Circuit Overtaking Difficulty Comparison
+
+driver_overtake <- race_qual |>
+  filter(!is.na(overtaking_score)) |>
+  group_by(constructor, driver, round, overtaking_score) |>
+  summarize(
+    mean_positions_gained = mean(positions_gained, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+driver_overtake_summary <- driver_overtake |>
+  group_by(constructor, driver) |>
+  summarize(
+    avg_pos_gained = mean(mean_positions_gained, na.rm = TRUE),
+    avg_overtake_score = mean(overtaking_score, na.rm = TRUE),
+    n_rounds = n(),
+    .groups = "drop"
+  ) |>
+  filter(n_rounds >= 3)   # keep only drivers with enough data
+
+library(Polychrome)
+
+driver_names <- sort(unique(driver_overtake_summary$driver))
+
+# generate a palette with distinct colors
+driver_palette <- createPalette(
+  length(driver_names),
+  seedcolors = c("#ff0000", "#00ff00", "#0000ff")   # ensures wide color spread
+)
+
+names(driver_palette) <- driver_names
+
+ggplot(driver_overtake_summary,
+       aes(x = avg_overtake_score,
+           y = avg_pos_gained,
+           color = driver)) +
+
+  geom_point(size = 3, alpha = 0.9) +
+  facet_wrap(
+    ~ constructor,
+    scales = "free_y",
+    ncol = 4,
+    labeller = label_wrap_gen(width = 12)) +
+  scale_color_manual(values = driver_palette) +
+
+  labs(
+    title = "Driver Racecraft vs Circuit Overtaking Difficulty",
+    x = "Average Circuit Overtaking Score",
+    y = "Avg. Positions Gained",
+    color = "Driver") +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 11, face = "bold"),  # clearer constructor titles
+    strip.background = element_rect(fill = "gray92"),
+
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    panel.grid.minor = element_blank(),
+    panel.spacing = unit(0.9, "lines"),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.35, "cm"),
+    legend.spacing.y = unit(0.2, "cm")) +
+  guides(color = guide_legend(ncol = 1))
+```
+## Which Drivers Gain More Places on Circuits Where Overtaking Is Easier?
+
+This scatter-and-facet plot compares each driver's average positions gained with the overtaking friendliness of circuits. Some drivers like appear to gain positions consistently, like Leclerc, Zhou, Gasly, and Hulkenberg. The intra-team facets also show clearly which teammates outperform each other in that even with identical machinery, some consistently gain positions where their teammates do not.
+
+```{r}
+# Interpretable ML: Trying to predict which driver finishes ahead within their team in the 2024 season based on their skills (accounting for differences in circuits)
+
+# median overtaking score to define "low vs high overtaking" tracks
+overtake_med <- median(race_qual$overtaking_score, na.rm = TRUE)
+
+driver_feats <- race_qual |>
+  group_by(constructor, driver, driver_code) |>
+  summarize(
+    n_races = n(),
+    avg_qual_pos        = mean(qual_for_comparison, na.rm = TRUE),
+    avg_finish_pos      = mean(finish_pos, na.rm = TRUE),
+    avg_positions_gained = mean(positions_gained, na.rm = TRUE),
+
+    # Wet vs dry racecraft
+    mean_gain_dry = mean(positions_gained[is_wet_race == FALSE], na.rm = TRUE),
+    mean_gain_wet = mean(positions_gained[is_wet_race == TRUE],  na.rm = TRUE),
+
+    # Street vs permanent racecraft
+    mean_gain_perm   = mean(positions_gained[circuit_type == "permanent"], na.rm = TRUE),
+    mean_gain_street = mean(positions_gained[circuit_type == "street"],    na.rm = TRUE),
+
+    # Low vs high overtaking-score racecraft
+    mean_gain_lowOver  = mean(positions_gained[overtaking_score <  overtake_med], na.rm = TRUE),
+    mean_gain_highOver = mean(positions_gained[overtaking_score >= overtake_med], na.rm = TRUE),
+
+    .groups = "drop"
+  ) |>
+  mutate(
+    wet_gain_delta   = replace_na(mean_gain_wet   - mean_gain_dry,   0),
+    street_gain_delta= replace_na(mean_gain_street- mean_gain_perm,  0),
+    lowOver_gain_delta =
+      replace_na(mean_gain_lowOver - mean_gain_highOver, 0)
+  ) |>
+  select(
+    constructor, driver, driver_code, n_races,
+    avg_qual_pos, avg_finish_pos, avg_positions_gained,
+    wet_gain_delta, street_gain_delta, lowOver_gain_delta
+  )
+
+driver_feats <- driver_feats |>
+  mutate(across(where(is.numeric), ~ replace_na(.x, 0)))
+
+# create per-race teammate pairs: Driver A vs Driver B
+race_pairs <- race_qual |>
+  filter(!is.na(finish_pos)) |>
+  group_by(round, constructor) |>
+  # keep only races where the team had exactly 2 classified drivers
+  filter(n() == 2) |>
+  arrange(round, constructor, driver_code) |>
+  mutate(role = c("A", "B")) |>
+  ungroup() |>
+  select(round, constructor, role, driver, driver_code, finish_pos) |>
+  tidyr::pivot_wider(
+    names_from  = role,
+    values_from = c(driver, driver_code, finish_pos),
+    names_sep   = "_"
+  ) |>
+  mutate(
+    A_beats_B = as.integer(finish_pos_A < finish_pos_B)  # 1 if A finishes ahead
+  )
+
+# join features for driver A
+pairs_with_feat <- race_pairs |>
+  left_join(
+    driver_feats,
+    by = c("constructor", "driver_A" = "driver"),
+    suffix = c("", "_A")
+  ) |>
+  rename_with(~ paste0(.x, "_A"),
+              c(avg_qual_pos, avg_finish_pos, avg_positions_gained,
+                wet_gain_delta, street_gain_delta, lowOver_gain_delta))
+
+# join features for driver B
+pairs_with_feat <- pairs_with_feat |>
+  left_join(
+    driver_feats,
+    by = c("constructor", "driver_B" = "driver")
+  ) |>
+  rename_with(~ paste0(.x, "_B"),
+              c(avg_qual_pos, avg_finish_pos, avg_positions_gained,
+                wet_gain_delta, street_gain_delta, lowOver_gain_delta))
+
+# build "difference" features: (A - B)
+pair_model <- pairs_with_feat |>
+  mutate(
+    diff_avg_qual_pos        = avg_qual_pos_A        - avg_qual_pos_B,
+    diff_avg_positions_gained= avg_positions_gained_A - avg_positions_gained_B,
+    diff_wet_gain_delta      = wet_gain_delta_A      - wet_gain_delta_B,
+    diff_street_gain_delta   = street_gain_delta_A   - street_gain_delta_B,
+    diff_lowOver_gain_delta  = lowOver_gain_delta_A  - lowOver_gain_delta_B
+  ) |>
+  select(
+    round, constructor,
+    driver_A, driver_B, A_beats_B,
+    starts_with("diff_")
+  ) |>
+  drop_na(A_beats_B, starts_with("diff_"))
+
+head(pair_model)
+
+```
+
+
+```{r}
+# Interpretable Logistic Regression Model
+model_racecraft <- glm(
+  A_beats_B ~ diff_avg_qual_pos +
+              diff_avg_positions_gained +
+              diff_wet_gain_delta +
+              diff_street_gain_delta +
+              diff_lowOver_gain_delta,
+  data = pair_model,
+  family = binomial()
+)
+
+summary(model_racecraft)
+
+coefs <- coef(model_racecraft)
+
+beta <- c(
+  avg_qual_pos         = unname(coefs["diff_avg_qual_pos"]),
+  avg_positions_gained = unname(coefs["diff_avg_positions_gained"]),
+  wet_gain_delta       = unname(coefs["diff_wet_gain_delta"]),
+  street_gain_delta    = unname(coefs["diff_street_gain_delta"]),
+  lowOver_gain_delta   = unname(coefs["diff_lowOver_gain_delta"])
+)
+
+driver_ratings <- driver_feats |>
+  mutate(
+    skill_score =
+      beta["avg_qual_pos"]         * avg_qual_pos +
+      beta["avg_positions_gained"] * avg_positions_gained +
+      beta["wet_gain_delta"]       * wet_gain_delta +
+      beta["street_gain_delta"]    * street_gain_delta +
+      beta["lowOver_gain_delta"]   * lowOver_gain_delta
+  )
+
+# Rank drivers within each constructor
+team_rankings <- driver_ratings |>
+  group_by(constructor) |>
+  arrange(desc(skill_score), .by_group = TRUE) |>
+  mutate(predicted_team_rank = row_number()) |>
+  ungroup()
+
+team_rankings |>
+  select(constructor, predicted_team_rank, driver, skill_score) |>
+  arrange(constructor, predicted_team_rank)
+```
+
+```{r}
+# Graph 10 - Predicted Team Finishing
+
+actual_2024 <- tribble(
+  ~driver,              ~driver_code, ~constructor,       ~actual_pts,
+  "Max Verstappen",     "VER",        "Red Bull",         437,
+  "Lando Norris",       "NOR",        "McLaren",          374,
+  "Charles Leclerc",    "LEC",        "Ferrari",          356,
+  "Oscar Piastri",      "PIA",        "McLaren",          292,
+  "Carlos Sainz",       "SAI",        "Ferrari",          290,
+  "George Russell",     "RUS",        "Mercedes",         245,
+  "Lewis Hamilton",     "HAM",        "Mercedes",         223,
+  "Sergio Perez",       "PER",        "Red Bull",         152,
+  "Fernando Alonso",    "ALO",        "Aston Martin",     70,
+  "Pierre Gasly",       "GAS",        "Alpine F1 Team",   42,
+  "Nico Hulkenberg",    "HUL",        "Haas F1 Team",     41,
+  "Yuki Tsunoda",       "TSU",        "RB F1 Team",       30,
+  "Lance Stroll",       "STR",        "Aston Martin",     24,
+  "Esteban Ocon",       "OCO",        "Alpine F1 Team",   23,
+  "Kevin Magnussen",    "MAG",        "Haas F1 Team",     16,
+  "Alexander Albon",    "ALB",        "Williams",         12,
+  "Daniel Ricciardo",   "RIC",        "RB F1 Team",       12,
+  "Oliver Bearman",     "BEA",        "Haas F1 Team",     7,
+  "Franco Colapinto",   "COL",        "Williams",         5,
+  "Zhou Guanyu",        "ZHO",        "Sauber",           4,
+  "Liam Lawson",        "LAW",        "RB F1 Team",       4,
+  "Valtteri Bottas",    "BOT",        "Sauber",           0,
+  "Logan Sargeant",     "SAR",        "Williams",         0,
+  "Jack Doohan",        "DOO",        "Alpine F1 Team",   0
+)
+
+
+actual_rankings <- actual_2024 |>
+  group_by(constructor) |>
+  arrange(desc(actual_pts)) |>
+  mutate(actual_rank = row_number()) |>
+  ungroup()
+
+comparison <- team_rankings |>
+  left_join(
+    actual_rankings |> select(driver_code, constructor, actual_rank),
+    by = c("driver_code", "constructor")
+  )
+
+# plot
+ggplot(comparison,
+       aes(x = actual_rank, 
+           y = predicted_team_rank,
+           label = driver,
+           color = constructor)) +
+  geom_point(size = 3) +
+  geom_text(nudge_x = 0.1, nudge_y = 0.1, size = 3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  scale_x_reverse(breaks = 1:4) +   # 1 = best; flips axis for intuition
+  scale_y_reverse(breaks = 1:4) +
+  facet_wrap(~ constructor, scales = "free") +
+  labs(
+    title = "Predicted vs Actual Intra-Team Driver Rankings (2024)",
+    x = "Actual Rank (1 = best)",
+    y = "Predicted Rank (1 = best)") +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 10, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold")
+  )
+
+
+```
+
+## Comparing predicted intra-team rankings to actual finishing order from the 2024 season
+
+This plot compares each driver’s predicted intra-team ranking—based on qualifying pace, racecraft, wet-weather adjustments, street/permanent circuit effects, and low-overtake performance with their actual 2024 finishing order within their team. 
+
+Overall, the model performs surprisingly well given its simplicity. It almost completely ranks each drivers' intra-team standing accurately compared to the actual 2024 drivers' champioship standings. Some of the teams have a 3rd driver considered due to mid-season switches, which skews the analysis. However, of the team with 2 drivers, it seems that only Sauber was ranked incorrectly. Moreover, the Sauber mismatches likely stem from Bottas's unusually unlucky season relative to Zhou, despite underlying pace indicators suggesting the reverse. Some discrepancies arise in situations where 2024 real-world results were shaped by externalities not captured in the model, like Magnussen’s unusual crash-heavy season distort the underlying pace-based expectation. 
+
+Despite these exceptions, the model’s broad accuracy indicates that racecraft, qualifying pace, and condition-dependent performance explain a substantial portion of intra-team outcomes. This makes it a strong foundation for interpretable ML and a great candidate for further analysis via Shapley values.
+
+
+```{r}
+# Graph 11 - Posthoc ML Analysis with Shapley Values!
+library(iml)
+
+# predictor matrix used in modeling
+X <- pair_model |>
+  select(
+    diff_avg_qual_pos,
+    diff_avg_positions_gained,
+    diff_wet_gain_delta,
+    diff_street_gain_delta,
+    diff_lowOver_gain_delta
+  )
+
+y <- pair_model$A_beats_B
+
+predict_fun <- function(model, newdata) {
+  predict(model, newdata = as.data.frame(newdata), type = "response")
+}
+
+X_clean <- X
+attr(X_clean, "assign") <- NULL
+attr(X_clean, "contrasts") <- NULL
+
+library(iml)
+
+predictor_obj <- Predictor$new(
+  model = model_racecraft,
+  data  = as.data.frame(X_clean),
+  y     = y,
+  predict.function = predict_fun
+)
+
+shap <- Shapley$new(predictor_obj, x.interest = X_clean[1,])
+
+logloss <- function(actual, predicted) {
+  # numerical stabilizer for log()
+  eps <- 1e-15
+  predicted <- pmin(pmax(predicted, eps), 1 - eps)
+
+  -mean(actual * log(predicted) + (1 - actual) * log(1 - predicted))
+}
+
+imp <- FeatureImp$new(
+  predictor_obj,
+  loss = logloss
+)
+
+plot(imp)
+```
+
+## Feature Importance: Which Factors Most Influence Intra-Team Outcomes?
+
+The Shapley-based feature importance analysis shows that average qualifying advantage overwhelmingly drives the model’s ability to predict which teammate finishes ahead. Racecraft  plays a secondary role, offering modest predictive value, while situational effects—wet-weather performance, street-track advantage, and performance on low-overtaking circuits—contribute very little overall. This suggests that across a full season, consistent single-lap pace may be the clearest and most reliable differentiator between teammates, with racecraft providing additional but smaller impact.
