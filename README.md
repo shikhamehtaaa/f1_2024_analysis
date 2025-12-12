@@ -1,62 +1,13 @@
-This repo contains a [Quarto book](https://quarto.org/docs/books/) template for the EDAV final project.
+F1 2024 Driver Performance Analysis
 
-## Follow these instructions carefully
+This project explores Formula 1 driver performance during the 2024 season using open data from the Jolpica–Ergast API. The goal is to understand what actually separates elite drivers from their teammates once you account for car performance, race conditions, and circuit context. Rather than comparing drivers by championship points alone, this project uses contextual, within-team analysis to evaluate: qualifying pace and racecraft (positions gained) in the context of wet-weather performance, street vs. permanent circuit performance, and low vs. high overtaking conditions. 
 
-*If you have any difficulties or have feedback of any kind, please [file an issue](https://github.com/jtr13/quarto-edav-template/issues) or ask questions in the [Discussions](https://github.com/jtr13/quarto-edav-template/discussions) section.*
+The analysis includes extensive data cleaning, missing value exploration, facet-based visualization, and an interpretable logistic model predicting which teammate finishes ahead. Results are compared to actual 2024 season outcomes, and Shapley values are used to assess feature importance.
 
-[Video tutorial](https://www.youtube.com/watch?v=emgS2JI4jCk) (walkthrough of steps below)
+Key Findings:
 
-### Copy this template (GitHub)
+Drivers who outperform teammates consistently qualify better, so qualifying pace is the strongest predictor of finishing ahead. Racecraft varies widely in that some drivers gain positions reliably, others lose them even from strong grid starts. Wet conditions compress the field and reveal pure driver skill; some teams dramatically rise or fall in the rain. Street circuits favor drivers with adaptable, low-speed car control. The interpretable logistic regression model correctly predicts almost all intra-team finishing orders, demonstrating that these contextual features explain much of driver performance.
 
-- [ ] 1. Click the green "Use this template" button above and choose "Create a new repository". If you don't see the "Use this template" option, **log in to GitHub**. DO NOT FORK THE REPO. Choose a descriptive name for your repo, such as "federalbudget" or "AIDSdeaths". (If you change your topic before you do any work, delete the repo and start over.)
+Acknowledgments:
 
-- [ ] 2. Leave the setting for viewing the repo as "Public". (Otherwise, we will not be able to access your rendered book.)
-
-- [ ] 3. In the Description field, write "Source files for final project" then click "Create repository".
-
-### Set up Pages (GitHub)
-
-- [ ] 1. You've now left the template page and are viewing your new repo on GitHub. On the home page, click Settings. Click the "Pages" section on the left. In the Build and Deployment section, set Source to "Deploy from a branch" (Classic Pages experience) and Branch to main with /docs folder. Click Save.
-
-- [ ] 2. Click the little gear button near "About" on the top right side of the home page of the repo and check the "Use your Github Pages website" box under "Website". Click "Save changes". Test the link and you should see a web site with a stick figure on it. It may take a few minutes to build so if it's not working do a few more steps and then come back to check.
-
-### Copy the repo link (GitHub)
-
-- [ ] 1. Click the green Code button, choose "HTTPS" and copy the link below. It should have the format: https&#xfeff;://github.com/[USERNAME]/[REPONAME].git
-
-### Clone the repo (RStudio)
-
-- [ ] 1. Clone your new repo with *File, New Project..., Version Control, Git* in RStudio. You will need to paste the link from the previous step in the Repository URL box. If it's not automatically populated, enter the repo name in the "Project directory name:" box. Choose the location of the project.
-
-### Edit `_quarto.yml` (RStudio)
-
-Tip: From the file pane in RStudio, open `README.md`, which contains these instructions. You can delete steps as you complete them.
-
-- [ ] 1. Change the all caps info in the `title:`, `author:` and `repo-url` fields in the YAML (top) section of `_quarto.yml` to your info. (Note: it's very important to maintain the indenting structure in this file precisely as is -- be careful!)
-
-### Render the book (RStudio)
-
-- [ ] 1. If you haven't already, click "Help" "Check for Updates" to make sure you have the latest version of RStudio (and thus have Quarto installed.)
-
-- [ ] 2. Render the web site locally by clicking the "Build" tap on the right and then "Render Book".
-
-- [ ] 3. Use `browseURL("docs/index.html")` to view your book locally (or just open `docs/index.html` in a browser).
-
-- [ ] 4. If it looks good, commit and push all changed files to GitHub. 
-
-(You will need to repeat steps 2 and 4 every time you wish to update the book on GitHub Pages.)
-
-### Update README (GitHub or RStudio)
-
-- [ ] 1. Delete the content of this **README** and add a short description of your project in its place. If you're working locally, be sure to commit and push the changes to GitHub.
-
-### Optional
-
-- [ ] 1. Choose a theme from [https://bootswatch.com/](https://bootswatch.com/) and replace "cosmo" in `_quarto.yml` with your prefered theme.
-
-### Additional features
-
-Please consult the official guide to **quarto** book websites: [https://quarto.org/docs/books/](https://quarto.org/docs/books/)
-
-
-
+Thank you to the maintainers of Ergast and Jolpica for providing accessible Formula 1 data, and to the STATGR5702 teaching team for project guidance!
