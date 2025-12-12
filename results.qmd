@@ -471,34 +471,61 @@ This comparison of average qualifying performance in wet versus dry sessions rev
 
 ```{r}
 # Graph 5 - Wet Qualifying Pace
-
 wet_qual_rounds <- tracks_df |> 
   filter(is_wet_qual == TRUE) |>
   pull(round)
 
 wet_qual_data <- race_qual |>
-  filter(round %in% wet_qual_rounds)
+  filter(round %in% wet_qual_rounds) |>
+  # ensure constructor + driver are proper chars
+  mutate(
+    constructor = as.character(constructor),
+    driver = as.character(driver)
+  )
 
-ggplot(
-  wet_qual_data |> filter(!is.na(qual_for_comparison)),
-  aes(y = fct_reorder(driver, qual_for_comparison, .fun = median),
-    x = qual_for_comparison)) +
-  geom_boxplot(width = 0.15, outlier.size = 1, alpha = 0.85) +
-  scale_x_reverse(breaks = c(20, 15, 10, 5, 1)) +
-  
-  facet_wrap(~ constructor, scales = "free_y") +
-  
-  labs(title = "Intra-Team Wet-Weather Qualifying Pace",
-    x = "Qualifying Position (lower = faster)",
-    y = "Driver") +
-  theme_bw(base_size = 12) +
-  theme(
-    strip.text = element_text(size = 8, face = "bold"),
-    strip.background = element_rect(fill = "gray95"),
-    plot.title = element_text(size = 16, face = "bold"),
-    plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-    panel.grid.minor = element_blank(),
-    legend.position = "none")
+# Check if we have any rows *after* filtering for qualifying comparison
+wet_qual_filtered <- wet_qual_data |> filter(!is.na(qual_for_comparison))
+
+if (nrow(wet_qual_filtered) == 0) {
+  ggplot() +
+    labs(
+      title = "Intra-Team Wet-Weather Qualifying Pace",
+      subtitle = "No wet qualifying data available after filtering."
+    ) +
+    theme_minimal()
+} else {
+
+  # Only keep constructors actually present in the filtered data
+  present_constructors <- wet_qual_filtered |> 
+    distinct(constructor) |> 
+    pull(constructor)
+
+  wet_qual_filtered <- wet_qual_filtered |>
+    filter(constructor %in% present_constructors) |>
+    droplevels()
+
+  ggplot(
+    wet_qual_filtered,
+    aes(
+      y = fct_reorder(driver, qual_for_comparison, .fun = median),
+      x = qual_for_comparison
+    )
+  ) +
+    geom_boxplot(width = 0.15, outlier.size = 1, alpha = 0.85) +
+    scale_x_reverse(breaks = c(20, 15, 10, 5, 1)) +
+    facet_wrap(~ constructor, scales = "free_y", drop = TRUE) +
+    labs(
+      title = "Intra-Team Wet-Weather Qualifying Pace",
+      x = "Qualifying Position (lower = faster)",
+      y = "Driver"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      strip.text = element_text(size = 8, face = "bold"),
+      strip.background = element_rect(fill = "gray95"),
+      legend.position = "none"
+    )
+}
 ```
 ## Subheading: Who Thrives When the Track Turns Wet? Intra-Team Pace Under Rain Conditions
 
